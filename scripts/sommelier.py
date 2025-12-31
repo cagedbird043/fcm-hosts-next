@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Sommelier: IP 筛选器与负载均衡器 (CN 环境运行)
+Sommelier: IP 筛选器与负载均衡器 (CN 环境运行) - Project Mjolnir 2.0
 
-1. 高并发 TCP Connect 测速 (50 threads)
-2. 多样性优先筛选 (废除勃艮第算法)
-3. Shuffle + Round-Robin 分配到 9 个 FCM 域名
+1. 高并发 TCP Connect 测速 (100 threads)
+2. C 段爆破 + 自适应选优
+3. 只保留前 9 名 (对应 9 个 FCM 域名)
 4. 生成三种 hosts 文件: IPv4 / Dual / IPv6
 """
 
@@ -33,13 +33,11 @@ FCM_DOMAINS = [
 FCM_PORT = 5228  # FCM 专用心跳端口
 
 # 测速配置
-TCP_TIMEOUT = 2.0  # 2秒握不上就放弃
-MAX_WORKERS = 50
+TCP_TIMEOUT = 1.5  # 1.5秒握不上就放弃
+MAX_WORKERS = 100  # 提升并发
 
-# 筛选配置 (高频更新策略)
-MAX_LATENCY = 1000  # 只要成功且 < 1s 全部录取
-MAX_SAMPLE_COUNT = 50
-DIVERSITY_SAMPLE = 10
+# 选优配置
+MIN_IPS_PER_DOMAIN = 1  # 每个域名至少分配 N 个 IP
 
 
 @dataclass
@@ -91,90 +89,145 @@ class TCPSpeedometer:
                 sock.close()
 
 
-class DiversitySelector:
+class CSegmentExpander:
+    """C 段爆破器"""
+
+    @staticmethod
+    def expand_c_segment(ip: str) -> List[str]:
+        """扩展 IPv4 C 段: 1.2.3.4 -> 1.2.3.1 到 1.2.3.254"""
+        parts = ip.split('.')
+        if len(parts) != 4:
+            return [ip]
+        prefix = '.'.join(parts[:3]) + '.'
+        return [f"{prefix}{i}" for i in range(1, 255)]
+
+    @staticmethod
+    def expand_ipv6_block(ip: str) -> List[str]:
+        """扩展 IPv6 /124 段"""
+        # 简化处理：取前 7 个 16 位组作为前缀
+        parts = ip.split(':')
+        if len(parts) < 2:
+            return [ip]
+        # 找到最后一个完整段的位置
+        prefix_parts = parts[:7] if len(parts) >= 7 else parts
+        prefix = ':'.join(prefix_parts)
+        if not prefix.endswith(':'):
+            prefix += ':'
+        # 扩展最后 8 个地址
+        return [f"{prefix}{i:x}" for i in range(8)]
+
+
+class AdaptiveSelector:
     """
-    高频更新策略: 无差别录取 + 多样性优先
+    自适应选优算法 - Project Mjolnir 2.0
 
     核心思想:
-    1. 只要 TCP 成功且延迟 < 1000ms，全部录取
-    2. Shuffle 打乱顺序
-    3. 如果过多，从不同网段抽样保证跨度
+    1. C 段爆破: 发现成功 IP 后，扩展整个 C 段扫描
+    2. 自适应排序: 按延迟从低到高排序
+    3. 动态截断: 只保留前 9 名 (对应 9 个 FCM 域名)
     """
 
-    def __init__(self, max_latency: int = MAX_LATENCY,
-                 max_sample: int = MAX_SAMPLE_COUNT,
-                 diversity_sample: int = DIVERSITY_SAMPLE):
-        self.max_latency = max_latency
-        self.max_sample = max_sample
-        self.diversity_sample = diversity_sample
+    def __init__(self, timeout: float = TCP_TIMEOUT, max_workers: int = MAX_WORKERS):
+        self.timeout = timeout
+        self.max_workers = max_workers
 
-    def get_ip_block(self, ip: str) -> str:
-        """获取 IP 网段 (IPv4 取 C 段，IPv6 取 /64 段)"""
-        if ':' in ip:  # IPv6: 取前 4 个 16 位组 (共 64 位)
-            parts = ip.split(':')
-            return ':'.join(parts[:4]) + ':'
-        else:  # IPv4: 取 C 段 (前 3 个 octet)
-            parts = ip.split('.')
+    def get_c_segment(self, ip: str) -> str:
+        """获取 IPv4 C 段"""
+        parts = ip.split('.')
+        if len(parts) == 4:
             return '.'.join(parts[:3]) + '.'
+        return ip
 
-    def select_ips(self, results: List[SpeedResult]) -> List[str]:
-        """筛选 IP (Shuffle + 无差别录取)"""
-        # 分类
-        successful = [r for r in results if r.success]
-        failed = [r for r in results if not r.success]
+    def get_ipv6_block(self, ip: str) -> str:
+        """获取 IPv6 /64 段"""
+        parts = ip.split(':')
+        if len(parts) >= 4:
+            return ':'.join(parts[:4]) + ':'
+        return ip
+
+    def expand_and_rescan(self, initial_ips: List[str]) -> List[SpeedResult]:
+        """C 段爆破 + 重新扫描"""
+        # 首次扫描
+        print(f"  Initial scan: {len(initial_ips)} IPs...")
+        initial_results = batch_measure(initial_ips, timeout=self.timeout, max_workers=self.max_workers)
+
+        # 找出成功的 IP，按网段分组
+        successful = [r for r in initial_results if r.success]
+        print(f"  First pass: {len(successful)} successful")
 
         if not successful:
-            print(f"  No successful connections (failed: {len(failed)})")
-            return []
-
-        # 无差别录取: 成功且 < 1000ms
-        qualified = [r for r in successful if r.latency_ms < self.max_latency]
-        print(f"  Success: {len(successful)}, Qualified (<{self.max_latency}ms): {len(qualified)}")
-
-        if not qualified:
-            print(f"  All successful IPs exceeded latency threshold")
-            return []
-
-        # Shuffle 打乱
-        random.shuffle(qualified)
-
-        # 如果数量在范围内，全部保留
-        if len(qualified) <= self.max_sample:
-            ips = [r.ip for r in qualified]
-            print(f"  Selected all {len(ips)} IPs (no sampling needed)")
-            return ips
-
-        # 数量过多，执行多样性抽样
-        print(f"  Too many qualified IPs ({len(qualified)}), performing diversity sampling...")
+            return initial_results
 
         # 按网段分组
         blocks = {}
-        for r in qualified:
-            block = self.get_ip_block(r.ip)
+        for r in successful:
+            if ':' in r.ip:  # IPv6
+                block = self.get_ipv6_block(r.ip)
+            else:  # IPv4
+                block = self.get_c_segment(r.ip)
             if block not in blocks:
                 blocks[block] = []
             blocks[block].append(r)
 
-        print(f"  Found {len(blocks)} unique network blocks")
+        print(f"  Found {len(blocks)} successful blocks, expanding...")
 
-        # 从每个网段抽样
-        sampled = []
-        for block, items in blocks.items():
-            sample_count = min(self.diversity_sample, len(items))
-            sampled.extend(random.sample(items, sample_count))
-            print(f"    {block}: {len(items)} -> {sample_count} sampled")
+        # 爆破每个成功的网段
+        ips_to_rescan = []
+        for block, success_ips in blocks.items():
+            if ':' in block:  # IPv6
+                # 取一个成功 IP 作为种子扩展
+                seed = success_ips[0].ip
+                expanded = CSegmentExpander.expand_ipv6_block(seed)
+            else:  # IPv4
+                # 取一个成功 IP 作为种子扩展
+                seed = success_ips[0].ip
+                expanded = CSegmentExpander.expand_c_segment(seed)
 
-        # 再次 Shuffle
-        random.shuffle(sampled)
+            # 过滤掉已经测过的
+            tested = {r.ip for r in initial_results}
+            new_ips = [ip for ip in expanded if ip not in tested]
+            ips_to_rescan.extend(new_ips)
+            print(f"    {block}: +{len(new_ips)} new IPs to scan")
 
-        # 如果抽样后仍然过多，缩减到上限
-        if len(sampled) > self.max_sample:
-            sampled = sampled[:self.max_sample]
-            print(f"  Final pool reduced to {len(sampled)} IPs")
+        if not ips_to_rescan:
+            print("  No new IPs to expand")
+            return initial_results
 
-        ips = [r.ip for r in sampled]
-        print(f"  Selected {len(ips)} IPs with network diversity")
-        return ips
+        # 重新扫描新 IPs
+        print(f"  Expanding scan: {len(ips_to_rescan)} new IPs...")
+        expanded_results = batch_measure(ips_to_rescan, timeout=self.timeout, max_workers=self.max_workers)
+
+        # 合并结果
+        all_results = initial_results + expanded_results
+        return all_results
+
+    def select_top_ips(self, results: List[SpeedResult]) -> List[str]:
+        """自适应选优: 按延迟排序，动态截断"""
+        # 只保留成功的
+        successful = [r for r in results if r.success]
+
+        if not successful:
+            print(f"  No successful connections")
+            return []
+
+        # 按延迟从低到高排序
+        sorted_results = sorted(successful, key=lambda x: x.latency_ms)
+
+        # 动态截断: 保留前 9 名 (对应 9 个 FCM 域名)
+        target_count = len(FCM_DOMAINS) * MIN_IPS_PER_DOMAIN  # 至少 9 个
+
+        if len(sorted_results) > target_count:
+            top_ips = sorted_results[:target_count]
+            dropped = len(sorted_results) - target_count
+            print(f"  Selected top {len(top_ips)} IPs, dropped {dropped} slower IPs")
+        else:
+            top_ips = sorted_results
+            print(f"  Selected all {len(top_ips)} successful IPs")
+
+        # 再次 shuffle 避免固定顺序
+        random.shuffle(top_ips)
+
+        return [r.ip for r in top_ips]
 
 
 class LoadBalancer:
@@ -213,12 +266,13 @@ def load_ips(filepath: str) -> List[str]:
 
 
 def batch_measure(ips: List[str], port: int = FCM_PORT,
-                  max_workers: int = MAX_WORKERS) -> List[SpeedResult]:
+                  max_workers: int = MAX_WORKERS,
+                  timeout: float = TCP_TIMEOUT) -> List[SpeedResult]:
     """批量测速"""
     if not ips:
         return []
 
-    speedometer = TCPSpeedometer(port)
+    speedometer = TCPSpeedometer(port, timeout)
     results = []
 
     print(f"  Measuring {len(ips)} IPs with {max_workers} threads...")
@@ -244,7 +298,7 @@ def generate_hosts_content(entries: List[Tuple[str, str]], ip_type: str) -> str:
         f"# Type: {ip_type}",
         f"#",
         f"# FCM Domains: {', '.join(FCM_DOMAINS[:3])}...",
-        f"# Generated using Diversity-First algorithm with Shuffle",
+        f"# Generated using Adaptive Ranking with C-Segment Expansion",
         f"#",
         "",
     ]
@@ -261,34 +315,38 @@ def generate_hosts_content(entries: List[Tuple[str, str]], ip_type: str) -> str:
 def main():
     """主入口"""
     print("=" * 60)
-    print("FCM Sommelier - IP 多样性筛选与负载均衡")
+    print("FCM Sommelier - Project Mjolnir 2.0")
     print("=" * 60)
 
-    selector = DiversitySelector()
+    selector = AdaptiveSelector(timeout=TCP_TIMEOUT, max_workers=MAX_WORKERS)
     all_results = {}
 
     # ===== IPv4 处理 =====
-    print("\n[Step 1] Loading and measuring IPv4 IPs...")
+    print("\n[Step 1] C-Segment Expansion + Adaptive Ranking (IPv4)...")
     ipv4_ips = load_ips("raw_ips_v4.txt")
-    random.shuffle(ipv4_ips)  # 极致 shuffle
-    print(f"  Loaded {len(ipv4_ips)} IPv4 IPs")
+    random.shuffle(ipv4_ips)
+    print(f"  Loaded {len(ipv4_ips)} seed IPs")
 
     if ipv4_ips:
-        ipv4_results = batch_measure(ipv4_ips, port=5228)
-        all_results['v4'] = selector.select_ips(ipv4_results)
+        # C 段爆破 + 重新扫描
+        ipv4_all_results = selector.expand_and_rescan(ipv4_ips)
+        # 自适应选优: 只保留前 9 名
+        all_results['v4'] = selector.select_top_ips(ipv4_all_results)
     else:
         all_results['v4'] = []
         print("  No IPv4 IPs to process")
 
     # ===== IPv6 处理 =====
-    print("\n[Step 2] Loading and measuring IPv6 IPs...")
+    print("\n[Step 2] IPv6 Block Expansion + Adaptive Ranking (IPv6)...")
     ipv6_ips = load_ips("raw_ips_v6.txt")
-    random.shuffle(ipv6_ips)  # 极致 shuffle
-    print(f"  Loaded {len(ipv6_ips)} IPv6 IPs")
+    random.shuffle(ipv6_ips)
+    print(f"  Loaded {len(ipv6_ips)} seed IPs")
 
     if ipv6_ips:
-        ipv6_results = batch_measure(ipv6_ips, port=5228)
-        all_results['v6'] = selector.select_ips(ipv6_results)
+        # IPv6 /124 爆破 + 重新扫描
+        ipv6_all_results = selector.expand_and_rescan(ipv6_ips)
+        # 自适应选优: 只保留前 9 名
+        all_results['v6'] = selector.select_top_ips(ipv6_all_results)
     else:
         all_results['v6'] = []
         print("  No IPv6 IPs to process")
@@ -318,16 +376,23 @@ def main():
     else:
         print("  Skipping fcm_ipv6.hosts (no premium IPv6 IPs)")
 
-    # 生成 Dual-stack (每个域名至少一条记录)
+    # 生成 Dual-stack (1:1 分配: 每个域名分配 1 个 v4 + 1 个 v6)
     entries_dual = []
 
-    # 优先使用 IPv4 (更稳定)，IPv6 备用
-    if all_results['v4']:
+    if all_results['v4'] and all_results['v6']:
+        # 双栈: 每个域名分配 v4 和 v6
+        lb_v4 = LoadBalancer(all_results['v4'], shuffle=True)
+        lb_v6 = LoadBalancer(all_results['v6'], shuffle=True)
+        for domain in FCM_DOMAINS:
+            entries_dual.append((lb_v4.assign(domain), domain))
+            entries_dual.append((lb_v6.assign(domain), domain))
+    elif all_results['v4']:
+        # 只有 v4: 每个域名分配 1 个 v4
         lb_v4 = LoadBalancer(all_results['v4'], shuffle=True)
         for domain in FCM_DOMAINS:
             entries_dual.append((lb_v4.assign(domain), domain))
-
-    if all_results['v6']:
+    elif all_results['v6']:
+        # 只有 v6: 每个域名分配 1 个 v6
         lb_v6 = LoadBalancer(all_results['v6'], shuffle=True)
         for domain in FCM_DOMAINS:
             entries_dual.append((lb_v6.assign(domain), domain))
@@ -349,9 +414,9 @@ def main():
         print("  Skipping fcm_dual.hosts (no IPs available)")
 
     print("\n" + "=" * 60)
-    print(f"Sommelier complete:")
-    print(f"  Qualified IPv4: {len(all_results['v4'])}")
-    print(f"  Qualified IPv6: {len(all_results['v6'])}")
+    print(f"Sommelier complete (Mjolnir 2.0):")
+    print(f"  Top IPv4: {len(all_results['v4'])}")
+    print(f"  Top IPv6: {len(all_results['v6'])}")
     print("=" * 60)
 
 

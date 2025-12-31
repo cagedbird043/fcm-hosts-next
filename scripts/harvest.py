@@ -14,34 +14,58 @@ from typing import Set
 from dns.rdatatype import RdataType
 
 
-# Google 权威 DNS 服务器 (IPv4)
-GOOGLE_DNS_SERVERS = [
+# DNS 服务器列表 (多源诱捕)
+DNS_SERVERS = [
+    # Google 权威 DNS
     "216.239.32.10",   # ns1.google.com
     "216.239.34.10",   # ns2.google.com
     "216.239.36.10",   # ns3.google.com
     "216.239.38.10",   # ns4.google.com
+    # 国内外公共 DNS
+    "168.95.192.1",    # HiNet DNS
+    "1.1.1.1",         # Cloudflare
+    "9.9.9.9",         # Quad9
+    "101.101.101.101", # 台湾中华电信
+    "8.8.8.8",         # Google Public DNS
 ]
 
-# 中国核心骨干网 CIDR 列表 (用于生成 ECS 子网)
+# 中国核心骨干网 CIDR 列表 (用于生成 ECS 子网) - 扩展版
 CHINA_BACKBONE_V4 = [
     # 教育网
     "202.112.0.0/16",
-    # 电信骨干网 (部分典型网段)
+    "202.113.0.0/16",
+    # 电信骨干网 (全国)
     "1.0.0.0/8",
     "14.1.0.0/16",
+    "14.208.0.0/12",
     "111.206.0.0/16",
+    "111.207.0.0/16",
+    "111.208.0.0/14",
     "180.149.0.0/16",
+    "180.150.0.0/15",
     "219.158.0.0/17",
+    "219.158.128.0/17",
+    "220.195.0.0/15",
+    "221.12.0.0/16",
+    "221.13.0.0/16",
+    "221.176.0.0/12",
+    "223.5.0.0/16",
     # 联通骨干网
     "202.106.0.0/16",
     "202.99.0.0/16",
+    "202.106.192.0/14",
     "221.12.0.0/16",
     "221.13.0.0/16",
     # 移动骨干网
     "117.144.0.0/16",
-    "183.128.0.0/16",
-    # 铁通
+    "117.128.0.0/10",
+    "183.128.0.0/11",
+    "223.0.0.0/12",
+    # 铁通/鹏博士
     "43.254.0.0/16",
+    "106.120.0.0/14",
+    # 方正/长城等
+    "111.206.0.0/16",
 ]
 
 CHINA_BACKBONE_V6 = [
@@ -53,8 +77,13 @@ CHINA_BACKBONE_V6 = [
     "2408::/12",
     # 移动骨干网 IPv6
     "2400::/12",
+    "2402::/14",
+    "2408::/10",
     # 铁通骨干网 IPv6
     "240c::/12",
+    # 阿里云/腾讯云
+    "2401:da00::/32",
+    "2402:4e00::/22",
 ]
 
 TARGET_DOMAIN = "mtalk.google.com"
@@ -162,7 +191,7 @@ def harvest_v4() -> Set[str]:
     print("\n=== Harvesting IPv4 ===")
     all_ips = set()
 
-    for dns_server in GOOGLE_DNS_SERVERS:
+    for dns_server in DNS_SERVERS:
         ips = query_all(dns_server, TARGET_DOMAIN, RdataType.A, CHINA_BACKBONE_V4)
         all_ips.update(ips)
 
@@ -174,7 +203,7 @@ def harvest_v6() -> Set[str]:
     print("\n=== Harvesting IPv6 ===")
     all_ips = set()
 
-    for dns_server in GOOGLE_DNS_SERVERS:
+    for dns_server in DNS_SERVERS:
         ips = query_all(dns_server, TARGET_DOMAIN, RdataType.AAAA, CHINA_BACKBONE_V6)
         all_ips.update(ips)
 
@@ -195,7 +224,7 @@ def main():
     print("FCM Harvester - DNS 采集器")
     print("=" * 60)
     print(f"Target domain: {TARGET_DOMAIN}")
-    print(f"DNS servers: {GOOGLE_DNS_SERVERS}")
+    print(f"DNS servers: {DNS_SERVERS}")
     print("-" * 60)
 
     # 采集 IPv4
