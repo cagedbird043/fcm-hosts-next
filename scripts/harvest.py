@@ -8,7 +8,6 @@ Harvest: DNS 采集器 (US 环境运行)
 
 import dns.message
 import dns.query
-import dns.rdatatype
 import dns.edns
 import ipaddress
 from typing import Set
@@ -93,7 +92,7 @@ def create_ecs_option(subnet: str) -> dns.edns.ECSOption:
     return dns.edns.ECSOption(address, srclen=prefix_len, scopelen=0)
 
 
-def query_with_ecs(dns_server: str, qname: str, rdtype: int,
+def query_with_ecs(dns_server: str, qname: str, rdtype: RdataType,
                    ecs_subnet: str, timeout: float = 10.0) -> Set[str]:
     """
     使用指定 DNS 服务器和 ECS 子网查询记录
@@ -101,7 +100,7 @@ def query_with_ecs(dns_server: str, qname: str, rdtype: int,
     Args:
         dns_server: DNS 服务器 IP
         qname: 查询域名
-        rdtype: 记录类型 (A=1 或 AAAA=28)
+        rdtype: 记录类型 (A 或 AAAA)
         ecs_subnet: ECS 子网 (如 "1.0.0.0/8" 或 "240e::/12")
         timeout: 超时时间(秒)
 
@@ -119,10 +118,10 @@ def query_with_ecs(dns_server: str, qname: str, rdtype: int,
 
         addrs = set()
         for rrset in response.answer:
-            if rdtype == dns.rdatatype.A and rrset.rdtype == dns.rdatatype.A:
+            if rdtype == RdataType.A and rrset.rdtype == RdataType.A:
                 for rr in rrset:
                     addrs.add(str(rr))
-            elif rdtype == dns.rdatatype.AAAA and rrset.rdtype == dns.rdatatype.AAAA:
+            elif rdtype == RdataType.AAAA and rrset.rdtype == RdataType.AAAA:
                 for rr in rrset:
                     addrs.add(str(rr))
 
@@ -132,7 +131,7 @@ def query_with_ecs(dns_server: str, qname: str, rdtype: int,
         return set()
 
 
-def query_all(dns_server: str, qname: str, rdtype: int,
+def query_all(dns_server: str, qname: str, rdtype: RdataType,
               ecs_subnets: list, timeout: float = 10.0) -> Set[str]:
     """
     使用指定 DNS 服务器轮询所有 ECS 子网
@@ -140,7 +139,7 @@ def query_all(dns_server: str, qname: str, rdtype: int,
     Args:
         dns_server: DNS 服务器 IP
         qname: 查询域名
-        rdtype: 记录类型
+        rdtype: 记录类型 (RdataType.A 或 RdataType.AAAA)
         ecs_subnets: ECS 子网列表
         timeout: 超时时间
 
@@ -148,7 +147,7 @@ def query_all(dns_server: str, qname: str, rdtype: int,
         收集到的 IP 地址集合
     """
     all_ips = set()
-    rdtype_name = "A" if rdtype == 1 else "AAAA"
+    rdtype_name = "A" if rdtype == RdataType.A else "AAAA"
 
     for ecs_subnet in ecs_subnets:
         ips = query_with_ecs(dns_server, qname, rdtype, ecs_subnet, timeout)
@@ -164,7 +163,7 @@ def harvest_v4() -> Set[str]:
     all_ips = set()
 
     for dns_server in GOOGLE_DNS_SERVERS:
-        ips = query_all(dns_server, TARGET_DOMAIN, 1, CHINA_BACKBONE_V4)
+        ips = query_all(dns_server, TARGET_DOMAIN, RdataType.A, CHINA_BACKBONE_V4)
         all_ips.update(ips)
 
     return all_ips
@@ -176,7 +175,7 @@ def harvest_v6() -> Set[str]:
     all_ips = set()
 
     for dns_server in GOOGLE_DNS_SERVERS:
-        ips = query_all(dns_server, TARGET_DOMAIN, 28, CHINA_BACKBONE_V6)
+        ips = query_all(dns_server, TARGET_DOMAIN, RdataType.AAAA, CHINA_BACKBONE_V6)
         all_ips.update(ips)
 
     return all_ips
