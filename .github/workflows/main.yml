@@ -52,18 +52,12 @@ jobs:
     name: Verify and Select Premium IPs
 
     env:
-      GIT_SSH_COMMAND: "ssh -o Hostname=ssh.github.com -o Port=443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+      GIT_SSH_COMMAND: ssh -o Hostname=ssh.github.com -o Port=443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false  # 不保存凭证，让我们自己配置 SSH
-          ssh-command: "ssh -o Hostname=ssh.github.com -o Port=443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-
-      - name: Configure SSH remote URL
+      - name: Clone repository
         run: |
-          git remote set-url origin ssh://git@ssh.github.com:443/cagedbird043/fcm-hosts-next.git
+          git clone --depth 1 ssh://git@ssh.github.com:443/cagedbird043/fcm-hosts-next.git .
 
       - name: Download raw IPs artifacts
         uses: actions/download-artifact@v4
