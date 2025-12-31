@@ -58,9 +58,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ssh-strict: false  # 禁用 checkout 的自动 SSH 检测
+          persist-credentials: false  # 不保存凭证，让我们自己配置 SSH
+          ssh-command: "ssh -o Hostname=ssh.github.com -o Port=443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-      - name: Configure SSH for GitHub
+      - name: Configure SSH remote URL
         run: |
           git remote set-url origin ssh://git@ssh.github.com:443/cagedbird043/fcm-hosts-next.git
 
