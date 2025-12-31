@@ -3,13 +3,14 @@
 Sommelier: IP 筛选器与负载均衡器 (CN 环境运行)
 
 1. 高并发 TCP Connect 测速 (50 threads)
-2. 勃艮第算法筛选"特级园" IP
-3. Round-Robin 分配到 9 个 FCM 域名
+2. 多样性优先筛选 (废除勃艮第算法)
+3. Shuffle + Round-Robin 分配到 9 个 FCM 域名
 4. 生成三种 hosts 文件: IPv4 / Dual / IPv6
 """
 
 import socket
 import concurrent.futures
+import random
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Set
 from threading import Lock
@@ -32,8 +33,13 @@ FCM_DOMAINS = [
 FCM_PORT = 5228  # FCM 专用心跳端口
 
 # 测速配置
-TCP_TIMEOUT = 3.0
+TCP_TIMEOUT = 2.0  # 2秒握不上就放弃
 MAX_WORKERS = 50
+
+# 筛选配置 (高频更新策略)
+MAX_LATENCY = 1000  # 只要成功且 < 1s 全部录取
+MAX_SAMPLE_COUNT = 50
+DIVERSITY_SAMPLE = 10
 
 
 @dataclass
@@ -85,55 +91,98 @@ class TCPSpeedometer:
                 sock.close()
 
 
-class BurgundyAlgorithm:
+class DiversitySelector:
     """
-    勃艮第算法: IP 筛选算法
+    高频更新策略: 无差别录取 + 多样性优先
 
     核心思想:
-    1. 找到延迟最低的基准 (min_latency)
-    2. 设定阈值 threshold = max(min_latency + 50ms, min_latency * 1.3)
-    3. 选出所有低于阈值的 IP 作为"特级园"
+    1. 只要 TCP 成功且延迟 < 1000ms，全部录取
+    2. Shuffle 打乱顺序
+    3. 如果过多，从不同网段抽样保证跨度
     """
 
-    def __init__(self, offset_ms: int = 50, multiplier: float = 1.3):
-        self.offset_ms = offset_ms
-        self.multiplier = multiplier
+    def __init__(self, max_latency: int = MAX_LATENCY,
+                 max_sample: int = MAX_SAMPLE_COUNT,
+                 diversity_sample: int = DIVERSITY_SAMPLE):
+        self.max_latency = max_latency
+        self.max_sample = max_sample
+        self.diversity_sample = diversity_sample
 
-    def calculate_threshold(self, min_latency: float) -> float:
-        """计算阈值"""
-        threshold1 = min_latency + self.offset_ms
-        threshold2 = min_latency * self.multiplier
-        return max(threshold1, threshold2)
+    def get_ip_block(self, ip: str) -> str:
+        """获取 IP 网段 (IPv4 取 C 段，IPv6 取 /64 段)"""
+        if ':' in ip:  # IPv6: 取前 4 个 16 位组 (共 64 位)
+            parts = ip.split(':')
+            return ':'.join(parts[:4]) + ':'
+        else:  # IPv4: 取 C 段 (前 3 个 octet)
+            parts = ip.split('.')
+            return '.'.join(parts[:3]) + '.'
 
-    def select_premium_ips(self, results: List[SpeedResult]) -> List[SpeedResult]:
-        """筛选特级园 IP"""
-        # 只保留成功的
+    def select_ips(self, results: List[SpeedResult]) -> List[str]:
+        """筛选 IP (Shuffle + 无差别录取)"""
+        # 分类
         successful = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+
         if not successful:
+            print(f"  No successful connections (failed: {len(failed)})")
             return []
 
-        # 按延迟排序
-        sorted_results = sorted(successful, key=lambda x: x.latency_ms)
+        # 无差别录取: 成功且 < 1000ms
+        qualified = [r for r in successful if r.latency_ms < self.max_latency]
+        print(f"  Success: {len(successful)}, Qualified (<{self.max_latency}ms): {len(qualified)}")
 
-        # 获取最小延迟
-        min_latency = sorted_results[0].latency_ms
+        if not qualified:
+            print(f"  All successful IPs exceeded latency threshold")
+            return []
 
-        # 计算阈值
-        threshold = self.calculate_threshold(min_latency)
+        # Shuffle 打乱
+        random.shuffle(qualified)
 
-        print(f"  Min latency: {min_latency:.2f}ms, Threshold: {threshold:.2f}ms")
+        # 如果数量在范围内，全部保留
+        if len(qualified) <= self.max_sample:
+            ips = [r.ip for r in qualified]
+            print(f"  Selected all {len(ips)} IPs (no sampling needed)")
+            return ips
 
-        # 筛选低于阈值的
-        premium = [r for r in sorted_results if r.latency_ms <= threshold]
-        print(f"  Selected {len(premium)} premium IPs out of {len(sorted_results)}")
+        # 数量过多，执行多样性抽样
+        print(f"  Too many qualified IPs ({len(qualified)}), performing diversity sampling...")
 
-        return premium
+        # 按网段分组
+        blocks = {}
+        for r in qualified:
+            block = self.get_ip_block(r.ip)
+            if block not in blocks:
+                blocks[block] = []
+            blocks[block].append(r)
+
+        print(f"  Found {len(blocks)} unique network blocks")
+
+        # 从每个网段抽样
+        sampled = []
+        for block, items in blocks.items():
+            sample_count = min(self.diversity_sample, len(items))
+            sampled.extend(random.sample(items, sample_count))
+            print(f"    {block}: {len(items)} -> {sample_count} sampled")
+
+        # 再次 Shuffle
+        random.shuffle(sampled)
+
+        # 如果抽样后仍然过多，缩减到上限
+        if len(sampled) > self.max_sample:
+            sampled = sampled[:self.max_sample]
+            print(f"  Final pool reduced to {len(sampled)} IPs")
+
+        ips = [r.ip for r in sampled]
+        print(f"  Selected {len(ips)} IPs with network diversity")
+        return ips
 
 
 class LoadBalancer:
-    """负载均衡器: Round-Robin 分配 IP 到域名"""
+    """负载均衡器: Shuffle + Round-Robin 分配 IP 到域名"""
 
-    def __init__(self, ips: List[str]):
+    def __init__(self, ips: List[str], shuffle: bool = True):
+        if shuffle:
+            random.shuffle(ips)
         self.ips = ips
         self.index = 0
         self.lock = Lock()
@@ -188,20 +237,22 @@ def batch_measure(ips: List[str], port: int = FCM_PORT,
 
 
 def generate_hosts_content(entries: List[Tuple[str, str]], ip_type: str) -> str:
-    """生成 hosts 文件内容"""
+    """生成 hosts 文件内容 (去重)"""
     lines = [
         f"# Generated by Project Mjolnir",
         f"# Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"# Type: {ip_type}",
         f"#",
         f"# FCM Domains: {', '.join(FCM_DOMAINS[:3])}...",
-        f"# Generated using Burgundy Algorithm for IP selection",
+        f"# Generated using Diversity-First algorithm with Shuffle",
         f"#",
         "",
     ]
 
+    seen = set()
     for ip, domain in entries:
-        if ip:
+        if ip and (ip, domain) not in seen:
+            seen.add((ip, domain))
             lines.append(f"{ip} {domain}")
 
     return "\n".join(lines)
@@ -210,21 +261,21 @@ def generate_hosts_content(entries: List[Tuple[str, str]], ip_type: str) -> str:
 def main():
     """主入口"""
     print("=" * 60)
-    print("FCM Sommelier - IP 筛选与负载均衡器")
+    print("FCM Sommelier - IP 多样性筛选与负载均衡")
     print("=" * 60)
 
-    burgundy = BurgundyAlgorithm()
+    selector = DiversitySelector()
     all_results = {}
 
     # ===== IPv4 处理 =====
     print("\n[Step 1] Loading and measuring IPv4 IPs...")
     ipv4_ips = load_ips("raw_ips_v4.txt")
+    random.shuffle(ipv4_ips)  # 极致 shuffle
     print(f"  Loaded {len(ipv4_ips)} IPv4 IPs")
 
     if ipv4_ips:
         ipv4_results = batch_measure(ipv4_ips, port=5228)
-        ipv4_premium = burgundy.select_premium_ips(ipv4_results)
-        all_results['v4'] = [r.ip for r in ipv4_premium]
+        all_results['v4'] = selector.select_ips(ipv4_results)
     else:
         all_results['v4'] = []
         print("  No IPv4 IPs to process")
@@ -232,12 +283,12 @@ def main():
     # ===== IPv6 处理 =====
     print("\n[Step 2] Loading and measuring IPv6 IPs...")
     ipv6_ips = load_ips("raw_ips_v6.txt")
+    random.shuffle(ipv6_ips)  # 极致 shuffle
     print(f"  Loaded {len(ipv6_ips)} IPv6 IPs")
 
     if ipv6_ips:
         ipv6_results = batch_measure(ipv6_ips, port=5228)
-        ipv6_premium = burgundy.select_premium_ips(ipv6_results)
-        all_results['v6'] = [r.ip for r in ipv6_premium]
+        all_results['v6'] = selector.select_ips(ipv6_results)
     else:
         all_results['v6'] = []
         print("  No IPv6 IPs to process")
@@ -267,42 +318,40 @@ def main():
     else:
         print("  Skipping fcm_ipv6.hosts (no premium IPv6 IPs)")
 
-    # 生成 Dual-stack (IPv4 + IPv6 for each domain)
-    if all_results['v4'] and all_results['v6']:
-        entries_dual = []
-        lb_v4 = LoadBalancer(all_results['v4'])
-        lb_v6 = LoadBalancer(all_results['v6'])
+    # 生成 Dual-stack (每个域名至少一条记录)
+    entries_dual = []
 
+    # 优先使用 IPv4 (更稳定)，IPv6 备用
+    if all_results['v4']:
+        lb_v4 = LoadBalancer(all_results['v4'], shuffle=True)
         for domain in FCM_DOMAINS:
             entries_dual.append((lb_v4.assign(domain), domain))
+
+    if all_results['v6']:
+        lb_v6 = LoadBalancer(all_results['v6'], shuffle=True)
+        for domain in FCM_DOMAINS:
             entries_dual.append((lb_v6.assign(domain), domain))
 
-        content_dual = generate_hosts_content(entries_dual, "Dual Stack (IPv4 + IPv6)")
+    if entries_dual:
+        # 确定描述
+        if all_results['v4'] and all_results['v6']:
+            desc = "Dual Stack (IPv4 + IPv6)"
+        elif all_results['v6']:
+            desc = "Dual Stack (IPv6 Only)"
+        else:
+            desc = "Dual Stack (IPv4 Only)"
+
+        content_dual = generate_hosts_content(entries_dual, desc)
         with open("fcm_dual.hosts", 'w') as f:
             f.write(content_dual)
-        print(f"  Generated fcm_dual.hosts ({len(entries_dual)} entries)")
-    elif all_results['v6']:
-        # IPv6 Only: 生成仅含 IPv6 的 Dual 文件
-        lb_v6 = LoadBalancer(all_results['v6'])
-        entries_dual = lb_v6.generate_entries(FCM_DOMAINS)
-        content_dual = generate_hosts_content(entries_dual, "Dual Stack (IPv6 Only)")
-        with open("fcm_dual.hosts", 'w') as f:
-            f.write(content_dual)
-        print(f"  Generated fcm_dual.hosts ({len(entries_dual)} entries) [IPv6 Only]")
-    elif all_results['v4']:
-        # 只有 IPv4，复制 IPv4 作为 fallback
-        with open("fcm_ipv4.hosts", 'r') as f:
-            content = f.read().replace("IPv4 Only", "Dual Stack (IPv4 only fallback)")
-        with open("fcm_dual.hosts", 'w') as f:
-            f.write(content)
-        print("  Generated fcm_dual.hosts (IPv4 fallback)")
+        print(f"  Generated fcm_dual.hosts ({len(entries_dual)} entries) [{desc}]")
     else:
         print("  Skipping fcm_dual.hosts (no IPs available)")
 
     print("\n" + "=" * 60)
     print(f"Sommelier complete:")
-    print(f"  Premium IPv4: {len(all_results['v4'])}")
-    print(f"  Premium IPv6: {len(all_results['v6'])}")
+    print(f"  Qualified IPv4: {len(all_results['v4'])}")
+    print(f"  Qualified IPv6: {len(all_results['v6'])}")
     print("=" * 60)
 
 
