@@ -20,7 +20,6 @@ Thumbs.db
 
 # Generated files
 raw_ips_*.txt
-fcm_*.hosts
 
 # Testing
 .pytest_cache/
