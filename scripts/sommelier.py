@@ -67,7 +67,11 @@ class TCPSpeedometer:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
             sock.settimeout(self.timeout)
-            sock.connect((ip, self.port, 0, 0))
+            # IPv4 使用 2 元组，IPv6 使用 4 元组
+            if ':' in ip:  # IPv6
+                sock.connect((ip, self.port, 0, 0))
+            else:  # IPv4
+                sock.connect((ip, self.port))
 
             latency = (time.perf_counter() - start_time) * 1000
             return SpeedResult(ip=ip, latency_ms=latency, success=True)

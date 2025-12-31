@@ -117,7 +117,7 @@ jobs:
 
           # 检查是否有变更
           if git diff --cached --quiet; then
-            echo "No changes to commit"
+            echo "No changes, but that is fine"
             exit 0
           fi
 
