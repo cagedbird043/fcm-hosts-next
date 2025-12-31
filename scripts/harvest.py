@@ -21,8 +21,10 @@ DNS_SERVERS = [
     "216.239.34.10",   # ns2.google.com
     "216.239.36.10",   # ns3.google.com
     "216.239.38.10",   # ns4.google.com
+    # 台湾中华电信 DNS (台北机房诱饵)
+    "168.95.192.1",    # HiNet Primary
+    "168.95.1.1",      # HiNet Secondary
     # 国内外公共 DNS
-    "168.95.192.1",    # HiNet DNS
     "1.1.1.1",         # Cloudflare
     "9.9.9.9",         # Quad9
     "101.101.101.101", # 台湾中华电信
@@ -66,6 +68,19 @@ CHINA_BACKBONE_V4 = [
     "106.120.0.0/14",
     # 方正/长城等
     "111.206.0.0/16",
+]
+
+# 台湾省核心诱饵网段 (TAIWAN_HITS) - 台北机房优质 IP
+TAIWAN_BACKBONE_V4 = [
+    "1.160.0.0/12",    # 台湾中华电信
+    "61.224.0.0/13",   # 台湾固网
+    "111.240.0.0/12",  # 台湾大哥大
+    "114.32.0.0/12",   # 台湾固网
+    "220.136.0.0/13",  # 亚太电信
+    "27.240.0.0/13",   # 台湾之星
+    "39.8.0.0/13",     # 中华电信
+    "42.72.0.0/13",    # 远传电信
+    "140.112.0.0/12",  # 台湾学术网络
 ]
 
 CHINA_BACKBONE_V6 = [
@@ -187,12 +202,16 @@ def query_all(dns_server: str, qname: str, rdtype: RdataType,
 
 
 def harvest_v4() -> Set[str]:
-    """采集 IPv4 地址"""
+    """采集 IPv4 地址 (包含台湾省诱饵网段)"""
     print("\n=== Harvesting IPv4 ===")
     all_ips = set()
 
+    # 合并中国骨干网 + 台湾省诱饵网段
+    all_subnets = CHINA_BACKBONE_V4 + TAIWAN_BACKBONE_V4
+    print(f"  Subnets: {len(CHINA_BACKBONE_V4)} CN + {len(TAIWAN_BACKBONE_V4)} TW = {len(all_subnets)} total")
+
     for dns_server in DNS_SERVERS:
-        ips = query_all(dns_server, TARGET_DOMAIN, RdataType.A, CHINA_BACKBONE_V4)
+        ips = query_all(dns_server, TARGET_DOMAIN, RdataType.A, all_subnets)
         all_ips.update(ips)
 
     return all_ips
