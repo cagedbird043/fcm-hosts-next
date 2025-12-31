@@ -37,13 +37,14 @@ jobs:
         run: |
           python scripts/harvest.py
 
-      - name: Upload raw IPs artifacts
+      - name: Upload artifacts (IPs + Scripts)
         uses: actions/upload-artifact@v4
         with:
-          name: raw-ips
+          name: workspace-data
           path: |
             raw_ips_v4.txt
             raw_ips_v6.txt
+            scripts/
           retention-days: 1
 
   verify:
@@ -51,23 +52,11 @@ jobs:
     runs-on: self-hosted
     name: Verify and Select Premium IPs
 
-    env:
-      GIT_SSH_COMMAND: ssh -o Hostname=ssh.github.com -o Port=443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-
     steps:
-      - name: Clone repository
-        run: |
-          WORKDIR=$(mktemp -d)
-          cd "$WORKDIR"
-          git clone --depth 1 ssh://git@ssh.github.com:443/cagedbird043/fcm-hosts-next.git .
-          cp -r .git scripts requirements.txt "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          rm -rf "$WORKDIR"
-
-      - name: Download raw IPs artifacts
+      - name: Download workspace
         uses: actions/download-artifact@v4
         with:
-          name: raw-ips
+          name: workspace-data
           path: .
 
       - name: Display downloaded files

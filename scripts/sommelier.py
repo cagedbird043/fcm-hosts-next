@@ -277,8 +277,16 @@ def main():
         with open("fcm_dual.hosts", 'w') as f:
             f.write(content_dual)
         print(f"  Generated fcm_dual.hosts ({len(entries_dual)} entries)")
+    elif all_results['v6']:
+        # IPv6 Only: 生成仅含 IPv6 的 Dual 文件
+        lb_v6 = LoadBalancer(all_results['v6'])
+        entries_dual = lb_v6.generate_entries(FCM_DOMAINS)
+        content_dual = generate_hosts_content(entries_dual, "Dual Stack (IPv6 Only)")
+        with open("fcm_dual.hosts", 'w') as f:
+            f.write(content_dual)
+        print(f"  Generated fcm_dual.hosts ({len(entries_dual)} entries) [IPv6 Only]")
     elif all_results['v4']:
-        # 如果没有 IPv6，复制 IPv4 作为 fallback
+        # 只有 IPv4，复制 IPv4 作为 fallback
         with open("fcm_ipv4.hosts", 'r') as f:
             content = f.read().replace("IPv4 Only", "Dual Stack (IPv4 only fallback)")
         with open("fcm_dual.hosts", 'w') as f:
