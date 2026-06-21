@@ -1,0 +1,96 @@
+name: FCM Hosts Pipeline
+
+on:
+  schedule:
+    - cron: '17 1,7,13,19 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - '.github/workflows/**'
+      - 'go.mod'
+      - 'go.sum'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Update FCM hosts - ') }}
+    runs-on: [self-hosted, Linux, X64, tencent-fcm, china-dualstack]
+    name: Harvest, verify, and publish
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ssh-key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          fetch-depth: 1
+
+      - name: Check Go
+        run: go version
+
+      - name: Test
+        run: go test ./...
+
+      - name: Run FCM host pipeline
+        run: go run ./cmd/fcmhost run -workdir .
+
+      - name: Display generated hosts files
+        run: |
+          ls -la fcm_*.hosts
+          sed -n '1,24p' fcm_dual.hosts
+
+      - name: Deploy hosts to cagedbird.cn
+        env:
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SERVER_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new)
+          ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'mkdir -p /srv/cagedbird/fcm-hosts-next'
+          scp "${ssh_opts[@]}" fcm_ipv4.hosts fcm_ipv6.hosts fcm_dual.hosts "$REMOTE_USER@$REMOTE_HOST:/srv/cagedbird/fcm-hosts-next/"
+          curl -fsSL --retry 3 --max-time 15 "https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts" | sed -n '1,12p'
+
+      - name: Guard publish scope
+        run: |
+          unexpected_paths="$(git status --porcelain --untracked-files=all | awk '{print $2}' | grep -vE '^fcm_(ipv4|ipv6|dual)\.hosts$' || true)"
+          if [ -n "$unexpected_paths" ]; then
+            echo "Unexpected changed files detected:"
+            printf '%s\n' "$unexpected_paths"
+            exit 1
+          fi
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and push
+        run: |
+          git add fcm_ipv4.hosts fcm_ipv6.hosts fcm_dual.hosts
+          if git diff --cached --quiet; then
+            echo "No changes, skipping commit"
+            exit 0
+          fi
+          COMMIT_MSG="Update FCM hosts - $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
+          if [ "$(git log -1 --format='%an')" = "github-actions[bot]" ]; then
+            git commit --amend -m "$COMMIT_MSG"
+            git push --force-with-lease origin main
+          else
+            git commit -m "$COMMIT_MSG"
+            git push origin main
+          fi
