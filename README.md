@@ -8,7 +8,7 @@
 
 1. **Harvest**：使用 EDNS Client Subnet (ECS) 查询 `mtalk.google.com`，采集候选 IPv4/IPv6。
 2. **Seed**：读取仓库内上一轮成功的 `fcm_*.hosts`，把历史可用 IP 继续作为种子。
-3. **Verify**：在大陆双栈 self-hosted runner 上对候选 IP 执行 TCP `5228` 连接测速。
+3. **Verify**：在大陆双栈机器（bj-edge）上对候选 IP 执行 TCP `5228` 连接测速。
 4. **Expand**：对已成功 IP 做小范围邻近扩展，再次实测。
 5. **Publish**：生成并提交 `fcm_ipv4.hosts`、`fcm_ipv6.hosts`、`fcm_dual.hosts`。
 
@@ -20,7 +20,7 @@
 - [fcm_ipv6.hosts](fcm_ipv6.hosts)：纯 IPv6 输出。
 - [fcm_ipv4.hosts](fcm_ipv4.hosts)：纯 IPv4 输出。
 
-默认每天更新 4 次；临时刷新可手动触发 GitHub Actions。
+默认每天更新 4 次（bj-edge 上的 `fcm-hosts-next.timer`）；临时刷新：`ssh bj-edge sudo systemctl start fcm-hosts-next.service`。
 
 ## 使用
 
@@ -58,11 +58,11 @@ _Status: Automated / Mainland dual-stack verified_
 
 ### Start here
 
-- 自动化运行 / runner 发布 / 本地验证 -> [.agents/skills/runner-publish/SKILL.md](.agents/skills/runner-publish/SKILL.md)
+- 自动化运行 / 服务器发布 / 本地验证 -> [.agents/skills/runner-publish/SKILL.md](.agents/skills/runner-publish/SKILL.md)
 
 ### Skills
 
-- [.agents/skills/runner-publish/SKILL.md](.agents/skills/runner-publish/SKILL.md): 管理 FCM hosts 更新流水线、SSH 秘钥配置与本地运行验证。Trigger: 修改 GitHub Actions 工作流、排查 hosts 刷新/服务器发布故障或验证业务代码。
+- [.agents/skills/runner-publish/SKILL.md](.agents/skills/runner-publish/SKILL.md): 管理 bj-edge 上的 FCM hosts 定时流水线、推送用 deploy key 与本地运行验证。Trigger: 修改 `scripts/publish.sh` 或 `deploy/`、排查 hosts 刷新/发布故障或验证业务代码。
 
 ### Deep docs
 

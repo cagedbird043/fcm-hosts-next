@@ -2,23 +2,24 @@
 
 > 💡 关于本项目的 Agent-native Skills 与任务路由，请先阅读 [README.md](README.md#agent-native-skills)。
 
-这个仓库生成并发布 Google Firebase Cloud Messaging (FCM) 优选 hosts，给 Android / microG / Google Play services 使用。生产流水线跑在中国大陆双栈 self-hosted runner 上。
+这个仓库生成并发布 Google Firebase Cloud Messaging (FCM) 优选 hosts，给 Android / microG / Google Play services 使用。生产流水线是 bj-edge（腾讯云北京，大陆双栈）上的 systemd 定时任务，全程在国内完成。
 
 ## 生产链路
 
-- Runner label：`self-hosted`, `Linux`, `X64`, `tencent-fcm`, `china-dualstack`
-- Workflow：`.github/workflows/main.yml`
+- 运行：bj-edge 的 `fcm-hosts-next.timer` → `fcm-hosts-next.service`（`deploy/` 下两个文件，装在 `/etc/systemd/system/`），以 `fcm-runner` 用户执行 `scripts/publish.sh`
+- 工作副本：`/var/lib/fcm-runner/fcm-hosts-next`（每轮先 `reset --hard origin/main`）
 - 调度：每天 4 次，UTC `01:17`, `07:17`, `13:17`, `19:17`
 - 生成：`go run ./cmd/fcmhost run -workdir .`
 - 发布文件：
   - `fcm_ipv4.hosts`
   - `fcm_ipv6.hosts`
   - `fcm_dual.hosts`
-- 分发路径：bj-edge（`154.8.231.248`）的 `/srv/cagedbird/fcm-hosts-next/`，由 `REMOTE_HOST`/`REMOTE_USER`/`SERVER_SSH_KEY` 指定
+- 分发路径：bj-edge 本机 `/srv/cagedbird/fcm-hosts-next/`，Caddy 站点 `fcm-hosts.cagedbird.cn`
 - 公网地址：`https://fcm-hosts.cagedbird.cn/fcm_dual.hosts`
+- GitHub Actions：`.github/workflows/main.yml` 只在代码改动时跑 `go test` 和 `shellcheck`，不采集、不发布
 
 ## 硬规则
 
-- **不走 HTTPS 提交:** Checkout 与 push 必须使用 SSH deploy key (`ACTIONS_DEPLOY_KEY`)，不能用 `GITHUB_TOKEN` 的 HTTPS 地址，以防大陆网络下 HTTPS 连接 GitHub 443 超时。
-- **防止自循环:** 自动生成的 hosts 提交必须带 `[skip ci]` 标签，且 workflow 触发条件需排除 bot push 避免无限循环。
-- **不直接修改生产环境:** 禁止在服务器上直接 `sed` 或编辑发布文件。任何更改必须本地生成并测试通过，再由 scp/workflow 部署。
+- **推送走 SSH 443:** `fcm-runner` 用 repo deploy key `fcm-runner@bj-edge`（可写）推送，`~/.ssh/config` 把 `github.com` 指到 `ssh.github.com:443`，不用 HTTPS token。
+- **防止自循环:** 自动生成的 hosts 提交必须带 `[skip ci]` 标签。
+- **不直接修改生产环境:** 禁止在服务器上直接 `sed` 或编辑发布文件。任何更改必须提交到仓库，由下一轮 `scripts/publish.sh` 生成和发布；`deploy/` 下的 unit 改动需要手动复制到 `/etc/systemd/system/` 并 `daemon-reload`。

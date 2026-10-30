@@ -1,0 +1,18 @@
+[Unit]
+Description=FCM hosts harvest, verify and publish
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=fcm-runner
+Group=fcm-runner
+WorkingDirectory=/var/lib/fcm-runner/fcm-hosts-next
+Environment=GOTOOLCHAIN=local
+ExecStart=/var/lib/fcm-runner/fcm-hosts-next/scripts/publish.sh
+TimeoutStartSec=20min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/fcm-runner /srv/cagedbird/fcm-hosts-next
