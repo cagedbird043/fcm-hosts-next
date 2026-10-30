@@ -14,9 +14,8 @@
   - `fcm_ipv4.hosts`
   - `fcm_ipv6.hosts`
   - `fcm_dual.hosts`
-- 分发路径：`/srv/cagedbird/fcm-hosts-next/`
-- 公网推荐地址：`https://fcm-hosts.cagedbird.cn/fcm_dual.hosts`
-- 兼容旧地址：`https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts`
+- 分发路径：bj-edge（`154.8.231.248`）的 `/srv/cagedbird/fcm-hosts-next/`，由 `REMOTE_HOST`/`REMOTE_USER`/`SERVER_SSH_KEY` 指定
+- 公网地址：`https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts`
 
 ## 硬规则
 

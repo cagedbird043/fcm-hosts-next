@@ -43,7 +43,7 @@ Before pushing any workflow or Go CLI updates:
 - Check local generated `fcm_dual.hosts`, `fcm_ipv4.hosts`, `fcm_ipv6.hosts` files for correct format (IP host entries).
 - Check remote serving URL:
   ```bash
-  curl -sI https://fcm-hosts.cagedbird.cn/fcm_dual.hosts
+  curl -sI https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts
   ```
 
 ## Guardrails

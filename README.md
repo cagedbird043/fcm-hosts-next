@@ -27,12 +27,6 @@
 服务器分发地址：
 
 ```text
-https://fcm-hosts.cagedbird.cn/fcm_dual.hosts
-```
-
-向后兼容地址（旧路径，仍可用）：
-
-```text
 https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts
 ```
 
