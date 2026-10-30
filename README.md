@@ -27,7 +27,7 @@
 服务器分发地址：
 
 ```text
-https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts
+https://fcm-hosts.cagedbird.cn/fcm_dual.hosts
 ```
 
 可用于：

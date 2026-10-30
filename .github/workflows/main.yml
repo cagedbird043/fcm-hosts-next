@@ -49,7 +49,7 @@ jobs:
           ls -la fcm_*.hosts
           sed -n '1,24p' fcm_dual.hosts
 
-      - name: Deploy hosts to cagedbird.cn
+      - name: Deploy hosts to bj-edge
         env:
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
@@ -63,7 +63,7 @@ jobs:
           ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new)
           ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'mkdir -p /srv/cagedbird/fcm-hosts-next'
           scp "${ssh_opts[@]}" fcm_ipv4.hosts fcm_ipv6.hosts fcm_dual.hosts "$REMOTE_USER@$REMOTE_HOST:/srv/cagedbird/fcm-hosts-next/"
-          curl -fsSL --retry 3 --max-time 15 "https://cagedbird.cn/fcm-hosts-next/fcm_dual.hosts" | sed -n '1,12p'
+          curl -fsSL --retry 3 --max-time 15 "https://fcm-hosts.cagedbird.cn/fcm_dual.hosts" | sed -n '1,12p'
 
       - name: Guard publish scope
         run: |
