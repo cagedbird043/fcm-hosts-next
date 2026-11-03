@@ -30,10 +30,11 @@ func run() error {
 		fs.StringVar(&opt.WorkDir, "workdir", ".", "directory containing seeds and output hosts")
 		fs.BoolVar(&opt.DNS, "dns", true, "collect DNS ECS seeds")
 		fs.BoolVar(&opt.Existing, "existing", true, "load existing hosts/raw seeds")
-		fs.BoolVar(&opt.Expand, "expand", true, "expand nearby IPs after first successful probe")
 		fs.IntVar(&opt.Workers, "workers", opt.Workers, "concurrent TCP probes")
 		fs.IntVar(&opt.TopN, "top", opt.TopN, "selected IPs per address family")
-		fs.DurationVar(&opt.Timeout, "timeout", opt.Timeout, "TCP probe timeout")
+		fs.IntVar(&opt.Candidates, "candidates", opt.Candidates, "shortlisted IPs per family for repeated sampling")
+		fs.IntVar(&opt.Samples, "samples", opt.Samples, "TCP handshakes per shortlisted IP")
+		fs.DurationVar(&opt.Timeout, "timeout", opt.Timeout, "first-pass TCP probe timeout")
 		fs.BoolVar(&opt.Verbose, "v", false, "verbose logs")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err

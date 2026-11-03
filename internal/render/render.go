@@ -16,40 +16,51 @@ type Meta struct {
 	SelV4  int
 	SelV6  int
 	Now    time.Time
+	Stats  map[string]pipeline.Candidate
 }
 
 func WriteAll(dir string, r pipeline.Result) error {
-	m := Meta{SeedV4: r.SeedV4, SeedV6: r.SeedV6, SelV4: len(r.SelectedV4), SelV6: len(r.SelectedV6), Now: time.Now().UTC()}
-	if len(r.SelectedV4) > 0 {
-		if err := write(filepath.Join(dir, "fcm_ipv4.hosts"), content(assign(r.SelectedV4, false), "IPv4 Only", m)); err != nil {
+	m := Meta{SeedV4: r.SeedV4, SeedV6: r.SeedV6, SelV4: len(r.SelectedV4), SelV6: len(r.SelectedV6), Now: time.Now().UTC(), Stats: map[string]pipeline.Candidate{}}
+	for _, c := range append(append([]pipeline.Candidate{}, r.SelectedV4...), r.SelectedV6...) {
+		m.Stats[c.IP] = c
+	}
+	v4, v6 := ips(r.SelectedV4), ips(r.SelectedV6)
+	if len(v4) > 0 {
+		if err := write(filepath.Join(dir, "fcm_ipv4.hosts"), content(assign(v4), "IPv4 Only", m)); err != nil {
 			return err
 		}
 	}
-	if len(r.SelectedV6) > 0 {
-		if err := write(filepath.Join(dir, "fcm_ipv6.hosts"), content(assign(r.SelectedV6, false), "IPv6 Only", m)); err != nil {
+	if len(v6) > 0 {
+		if err := write(filepath.Join(dir, "fcm_ipv6.hosts"), content(assign(v6), "IPv6 Only", m)); err != nil {
 			return err
 		}
 	}
 	dualEntries := [][2]string{}
-	if len(r.SelectedV4) > 0 && len(r.SelectedV6) > 0 {
+	if len(v4) > 0 && len(v6) > 0 {
 		for i, d := range pipeline.FCMDomains {
-			dualEntries = append(dualEntries, [2]string{r.SelectedV4[i%len(r.SelectedV4)], d})
-			dualEntries = append(dualEntries, [2]string{r.SelectedV6[i%len(r.SelectedV6)], d})
+			dualEntries = append(dualEntries, [2]string{v4[i%len(v4)], d})
+			dualEntries = append(dualEntries, [2]string{v6[i%len(v6)], d})
 		}
 		return write(filepath.Join(dir, "fcm_dual.hosts"), content(dualEntries, "Dual Stack (IPv4 + IPv6)", m))
 	}
-	if len(r.SelectedV4) > 0 {
-		dualEntries = assign(r.SelectedV4, false)
-		return write(filepath.Join(dir, "fcm_dual.hosts"), content(dualEntries, "Dual Stack (IPv4 Only)", m))
+	if len(v4) > 0 {
+		return write(filepath.Join(dir, "fcm_dual.hosts"), content(assign(v4), "Dual Stack (IPv4 Only)", m))
 	}
-	if len(r.SelectedV6) > 0 {
-		dualEntries = assign(r.SelectedV6, false)
-		return write(filepath.Join(dir, "fcm_dual.hosts"), content(dualEntries, "Dual Stack (IPv6 Only)", m))
+	if len(v6) > 0 {
+		return write(filepath.Join(dir, "fcm_dual.hosts"), content(assign(v6), "Dual Stack (IPv6 Only)", m))
 	}
 	return fmt.Errorf("no selected FCM IPs")
 }
 
-func assign(ips []string, _ bool) [][2]string {
+func ips(cs []pipeline.Candidate) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.IP)
+	}
+	return out
+}
+
+func assign(ips []string) [][2]string {
 	out := make([][2]string, 0, len(pipeline.FCMDomains))
 	for i, d := range pipeline.FCMDomains {
 		out = append(out, [2]string{ips[i%len(ips)], d})
@@ -64,7 +75,7 @@ func content(entries [][2]string, typ string, m Meta) string {
 	fmt.Fprintf(&b, "# Type: %s\n", typ)
 	fmt.Fprintf(&b, "#\n")
 	fmt.Fprintf(&b, "# FCM Domains: %s...\n", strings.Join(pipeline.FCMDomains[:3], ", "))
-	fmt.Fprintf(&b, "# Generated using Go single-node TCP 5228 ranking with nearby expansion\n")
+	fmt.Fprintf(&b, "# Generated using Go TCP 5228 two-stage ranking: single-shot shortlist, then repeated handshakes scored by median RTT + loss, one IP per /24 (IPv6 /64)\n")
 	fmt.Fprintf(&b, "#\n")
 	fmt.Fprintf(&b, "# Seeds: IPv4=%d, IPv6=%d\n", m.SeedV4, m.SeedV6)
 	fmt.Fprintf(&b, "# Selected: IPv4=%d, IPv6=%d\n", m.SelV4, m.SelV6)
@@ -79,6 +90,18 @@ func content(entries [][2]string, typ string, m Meta) string {
 	}
 	if v := os.Getenv("RUNNER_NAME"); v != "" {
 		fmt.Fprintf(&b, "# Verified On: %s\n", v)
+	}
+	statsSeen := map[string]bool{}
+	for _, e := range entries {
+		c, ok := m.Stats[e[0]]
+		if !ok || statsSeen[e[0]] {
+			continue
+		}
+		if len(statsSeen) == 0 {
+			fmt.Fprintf(&b, "#\n# Probe stats (TCP 5228 handshakes):\n")
+		}
+		statsSeen[e[0]] = true
+		fmt.Fprintf(&b, "#   %-26s median=%dms p90=%dms loss=%d/%d\n", e[0], c.Median.Milliseconds(), c.P90.Milliseconds(), c.Lost, c.Samples)
 	}
 	b.WriteString("\n")
 	seen := map[[2]string]bool{}

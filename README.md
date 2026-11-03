@@ -6,11 +6,12 @@
 
 当前生产架构是单机流水线：
 
-1. **Harvest**：使用 EDNS Client Subnet (ECS) 查询 `mtalk.google.com`，采集候选 IPv4/IPv6。
+1. **Harvest**：通过阿里 / DNSPod 等能透传 ECS 的解析器，用国内、台湾和海外子网查询 `mtalk` 与 `alt{1,3,5,7}-mtalk`，采集全球 PoP 的候选 IPv4/IPv6。离 bj-edge 最近的未必在亚洲（v6 美西 PoP 约 210ms，亚洲约 330ms），交给 TCP 实测决定。
 2. **Seed**：读取仓库内上一轮成功的 `fcm_*.hosts`，把历史可用 IP 继续作为种子。
-3. **Verify**：在大陆双栈机器（bj-edge）上对候选 IP 执行 TCP `5228` 连接测速。
-4. **Expand**：对已成功 IP 做小范围邻近扩展，再次实测。
-5. **Publish**：生成并提交 `fcm_ipv4.hosts`、`fcm_ipv6.hosts`、`fcm_dual.hosts`。
+3. **Verify**：在大陆双栈机器（bj-edge）上对候选 IP 执行一次 TCP `5228` 握手粗测。FCM 只在各 PoP 的 `.188` / `::bc` 上监听，不做邻近扩展。
+4. **Refine**：粗测最快的 40 个 IP 各间隔握手 20 次，按“中位 RTT + 丢包率 × 1s（SYN 重传代价）”评分；丢包过半的淘汰。只看 TCP，不看 ICMP：晚高峰出境链路的 ICMP 丢包对所有 Google IP 都差不多，分不出好坏。
+5. **Pick**：每个协议族按评分选 12 个，每个 /24（IPv6 为 /64）只取一个，保证每个 FCM 域名各占一个独立 IP。
+6. **Publish**：生成并提交 `fcm_ipv4.hosts`、`fcm_ipv6.hosts`、`fcm_dual.hosts`，文件头记录每个 IP 的中位延迟、p90 和丢包。
 
 核心实现是 Go 单二进制，无 Python runtime、无 pip 依赖、无跨 runner artifact 搬运。
 

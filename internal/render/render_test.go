@@ -11,7 +11,7 @@ import (
 
 func TestWriteAllDualStack(t *testing.T) {
 	dir := t.TempDir()
-	r := pipeline.Result{SeedV4: 2, SeedV6: 2, SelectedV4: []string{"1.1.1.1"}, SelectedV6: []string{"2001:db8::1"}}
+	r := pipeline.Result{SeedV4: 2, SeedV6: 2, SelectedV4: []pipeline.Candidate{{IP: "1.1.1.1", Samples: 20}}, SelectedV6: []pipeline.Candidate{{IP: "2001:db8::1", Samples: 20}}}
 	if err := WriteAll(dir, r); err != nil {
 		t.Fatal(err)
 	}

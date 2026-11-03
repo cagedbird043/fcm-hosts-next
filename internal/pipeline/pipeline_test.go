@@ -1,30 +1,48 @@
 package pipeline
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
-func TestExpandSuccessfulIPv4(t *testing.T) {
-	got := expandSuccessful([]ProbeResult{{IP: "1.2.3.188", OK: true}}, false)
-	if len(got) != 21 {
-		t.Fatalf("len=%d", len(got))
+func TestPickDistinctOnePerBlockThenFill(t *testing.T) {
+	cs := []Candidate{
+		{IP: "1.1.1.1", Samples: 20, Median: 10},
+		{IP: "1.1.1.2", Samples: 20, Median: 11},
+		{IP: "2.2.2.2", Samples: 20, Median: 50},
 	}
-	if got[0] != "1.2.3.178" || got[len(got)-1] != "1.2.3.198" {
-		t.Fatalf("range=%s..%s", got[0], got[len(got)-1])
+	got := pickDistinct(cs, 2)
+	if len(got) != 2 || got[0].IP != "1.1.1.1" || got[1].IP != "2.2.2.2" {
+		t.Fatalf("same /24 picked twice: %v", got)
+	}
+	got = pickDistinct(cs, 3)
+	if len(got) != 3 || got[2].IP != "1.1.1.2" {
+		t.Fatalf("fill from leftover IPs failed: %v", got)
 	}
 }
 
-func TestExpandSuccessfulIPv6(t *testing.T) {
-	got := expandSuccessful([]ProbeResult{{IP: "2607:f8b0:400e:c1b::bc", OK: true}}, true)
-	if len(got) != 16 {
-		t.Fatalf("len=%d", len(got))
+func TestPickDistinctIPv6BlockIs64(t *testing.T) {
+	cs := []Candidate{
+		{IP: "2404:6800:4008:c00::bc", Samples: 20, Median: 10},
+		{IP: "2404:6800:4008:c00::bd", Samples: 20, Median: 11},
+		{IP: "2404:6800:4008:c01::bc", Samples: 20, Median: 12},
 	}
-	if got[0] != "2607:f8b0:400e:c1b::b0" || got[15] != "2607:f8b0:400e:c1b::bf" {
-		t.Fatalf("range=%s..%s", got[0], got[15])
+	got := pickDistinct(cs, 2)
+	if len(got) != 2 || got[1].IP != "2404:6800:4008:c01::bc" {
+		t.Fatalf("got=%v", got)
 	}
 }
 
-func TestTopIPs(t *testing.T) {
-	got := topIPs([]ProbeResult{{IP: "1.1.1.1", OK: true, Latency: 20}, {IP: "1.1.1.2", OK: true, Latency: 10}, {IP: "1.1.1.3", OK: false}}, 1)
-	if len(got) != 1 || got[0] != "1.1.1.2" {
+func TestPickDistinctLossOutweighsSmallRTTGain(t *testing.T) {
+	ms := time.Millisecond
+	cs := []Candidate{
+		{IP: "1.1.1.1", Samples: 20, Lost: 4, Median: 170 * ms}, // 20% 丢包：期望 +200ms
+		{IP: "2.2.2.2", Samples: 20, Lost: 0, Median: 230 * ms},
+		{IP: "3.3.3.3", Samples: 20, Lost: 11, Median: 100 * ms}, // 丢包过半，淘汰
+		{IP: "4.4.4.4", Samples: 20, Lost: 20},
+	}
+	got := pickDistinct(cs, 4)
+	if len(got) != 2 || got[0].IP != "2.2.2.2" || got[1].IP != "1.1.1.1" {
 		t.Fatalf("got=%v", got)
 	}
 }

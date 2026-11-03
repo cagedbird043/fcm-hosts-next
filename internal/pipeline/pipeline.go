@@ -16,31 +16,35 @@ import (
 )
 
 type Options struct {
-	WorkDir   string
-	Target    string
-	Timeout   time.Duration
-	DNSDelay  time.Duration
-	Workers   int
-	TopN      int
-	Expand    bool
-	DNS       bool
-	Existing  bool
-	ProbePort int
-	Verbose   bool
+	WorkDir       string
+	Timeout       time.Duration
+	DNSDelay      time.Duration
+	Workers       int
+	TopN          int
+	Candidates    int
+	Samples       int
+	SampleGap     time.Duration
+	SampleTimeout time.Duration
+	DNS           bool
+	Existing      bool
+	ProbePort     int
+	Verbose       bool
 }
 
 func DefaultOptions() Options {
 	return Options{
-		WorkDir:   ".",
-		Target:    "mtalk.google.com",
-		Timeout:   1500 * time.Millisecond,
-		DNSDelay:  0,
-		Workers:   100,
-		TopN:      len(FCMDomains),
-		Expand:    true,
-		DNS:       true,
-		Existing:  true,
-		ProbePort: FCMPort,
+		WorkDir:       ".",
+		Timeout:       1500 * time.Millisecond,
+		DNSDelay:      0,
+		Workers:       100,
+		TopN:          len(FCMDomains),
+		Candidates:    40,
+		Samples:       20,
+		SampleGap:     250 * time.Millisecond,
+		SampleTimeout: synRetransmit,
+		DNS:           true,
+		Existing:      true,
+		ProbePort:     FCMPort,
 	}
 }
 
@@ -51,14 +55,20 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 	if opt.TopN <= 0 {
 		opt.TopN = len(FCMDomains)
 	}
-	if opt.Target == "" {
-		opt.Target = "mtalk.google.com"
-	}
 	if opt.Timeout == 0 {
 		opt.Timeout = 1500 * time.Millisecond
 	}
 	if opt.ProbePort == 0 {
 		opt.ProbePort = FCMPort
+	}
+	if opt.Candidates < opt.TopN {
+		opt.Candidates = opt.TopN
+	}
+	if opt.Samples <= 0 {
+		opt.Samples = 1
+	}
+	if opt.SampleTimeout == 0 {
+		opt.SampleTimeout = synRetransmit
 	}
 
 	seeds4 := []string{}
@@ -86,12 +96,12 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 
 func harvestDNS(ctx context.Context, opt Options) ([]string, []string) {
 	client := dnsprobe.Client{Timeout: 5 * time.Second}
-	v4Subnets := append([]string{}, ChinaBackboneV4...)
-	v4Subnets = append(v4Subnets, TaiwanBackboneV4...)
+	v4Subnets := append(append(append([]string{}, ChinaBackboneV4...), TaiwanBackboneV4...), GlobalV4...)
+	v6Subnets := append(append([]string{}, ChinaBackboneV6...), GlobalV6...)
 	type job struct {
-		ns, subnet string
-		qtype      uint16
-		v6         bool
+		ns, name, subnet string
+		qtype            uint16
+		v6               bool
 	}
 	type got struct {
 		ips []string
@@ -100,11 +110,13 @@ func harvestDNS(ctx context.Context, opt Options) ([]string, []string) {
 	}
 	jobs := []job{}
 	for _, ns := range DNSServers {
-		for _, subnet := range v4Subnets {
-			jobs = append(jobs, job{ns: ns, subnet: subnet, qtype: dnsprobe.TypeA})
-		}
-		for _, subnet := range ChinaBackboneV6 {
-			jobs = append(jobs, job{ns: ns, subnet: subnet, qtype: dnsprobe.TypeAAAA, v6: true})
+		for _, name := range HarvestNames {
+			for _, subnet := range v4Subnets {
+				jobs = append(jobs, job{ns: ns, name: name, subnet: subnet, qtype: dnsprobe.TypeA})
+			}
+			for _, subnet := range v6Subnets {
+				jobs = append(jobs, job{ns: ns, name: name, subnet: subnet, qtype: dnsprobe.TypeAAAA, v6: true})
+			}
 		}
 	}
 	limit := opt.Workers
@@ -129,7 +141,7 @@ func harvestDNS(ctx context.Context, opt Options) ([]string, []string) {
 				out <- got{err: ctx.Err(), job: j}
 				return
 			}
-			ips, err := client.QueryECS(ctx, j.ns, opt.Target, j.qtype, j.subnet)
+			ips, err := client.QueryECS(ctx, j.ns, j.name, j.qtype, j.subnet)
 			out <- got{ips: ips, err: err, job: j}
 			if opt.DNSDelay > 0 {
 				time.Sleep(opt.DNSDelay)
@@ -145,7 +157,7 @@ func harvestDNS(ctx context.Context, opt Options) ([]string, []string) {
 			if r.job.v6 {
 				kind = "AAAA"
 			}
-			fmt.Printf("dns %s %s %s -> %d", r.job.ns, kind, r.job.subnet, len(r.ips))
+			fmt.Printf("dns %s %s %s %s -> %d", r.job.ns, kind, r.job.name, r.job.subnet, len(r.ips))
 			if r.err != nil {
 				fmt.Printf(" err=%v", r.err)
 			}
@@ -197,23 +209,38 @@ func loadExistingSeeds(dir string) ([]string, []string) {
 	return uniqueIPs(v4), uniqueIPs(v6)
 }
 
-func selectFamily(ctx context.Context, seeds []string, opt Options, is6 bool) []string {
+// selectFamily 分两段：全部候选单次握手粗筛出 Candidates 个，再逐个多次采样精测，
+// 按预期建连耗时挑 TopN 个，每个 /24（IPv6 为 /64）只取一个。
+func selectFamily(ctx context.Context, seeds []string, opt Options, is6 bool) []Candidate {
 	if len(seeds) == 0 {
 		return nil
 	}
-	initial := batchProbe(ctx, seeds, opt)
-	all := append([]ProbeResult{}, initial...)
-	if opt.Expand {
-		expanded := expandSuccessful(initial, is6)
-		expanded = subtract(expanded, seeds)
-		if opt.Verbose {
-			fmt.Printf("expand v6=%v new=%d\n", is6, len(expanded))
+	all := batchProbe(ctx, seeds, opt)
+	short := shortlist(all, opt.Candidates)
+	refined := refine(ctx, short, opt)
+	picked := pickDistinct(refined, opt.TopN)
+	if opt.Verbose {
+		fmt.Printf("refine v6=%v shortlist=%d picked=%d\n", is6, len(short), len(picked))
+		sorted := append([]Candidate{}, refined...)
+		sortByScore(sorted)
+		chosen := map[string]bool{}
+		for _, c := range picked {
+			chosen[c.IP] = true
 		}
-		if len(expanded) > 0 {
-			all = append(all, batchProbe(ctx, expanded, opt)...)
+		for _, c := range sorted {
+			mark := " "
+			if chosen[c.IP] {
+				mark = "*"
+			}
+			fmt.Printf("%s %-28s %s\n", mark, c.IP, describe(c))
 		}
 	}
-	return topIPs(all, opt.TopN)
+	return picked
+}
+
+func describe(c Candidate) string {
+	return fmt.Sprintf("median=%dms p90=%dms loss=%d/%d score=%dms",
+		c.Median.Milliseconds(), c.P90.Milliseconds(), c.Lost, c.Samples, c.Score().Milliseconds())
 }
 
 func batchProbe(ctx context.Context, ips []string, opt Options) []ProbeResult {
@@ -271,74 +298,8 @@ func probeOne(ctx context.Context, ip string, port int, timeout time.Duration) P
 	return ProbeResult{IP: ip, Latency: lat, OK: true}
 }
 
-func expandSuccessful(results []ProbeResult, is6 bool) []string {
-	seenBlocks := map[string]bool{}
-	out := []string{}
-	for _, r := range results {
-		if !r.OK {
-			continue
-		}
-		addr, err := netip.ParseAddr(r.IP)
-		if err != nil {
-			continue
-		}
-		if is6 && addr.Is6() {
-			base := ipv6Block124(addr)
-			key := base.String()
-			if seenBlocks[key] {
-				continue
-			}
-			seenBlocks[key] = true
-			out = append(out, expandIPv6Block124(base)...)
-		} else if !is6 && addr.Is4() {
-			parts := strings.Split(r.IP, ".")
-			if len(parts) != 4 {
-				continue
-			}
-			key := strings.Join(parts[:3], ".")
-			if seenBlocks[key] {
-				continue
-			}
-			seenBlocks[key] = true
-			var last int
-			_, _ = fmt.Sscanf(parts[3], "%d", &last)
-			start, end := last-10, last+10
-			if start < 1 {
-				start = 1
-			}
-			if end > 254 {
-				end = 254
-			}
-			for i := start; i <= end; i++ {
-				out = append(out, fmt.Sprintf("%s.%d", key, i))
-			}
-		}
-	}
-	return uniqueIPs(out)
-}
-
-func ipv6Block124(addr netip.Addr) netip.Addr {
-	a := addr.As16()
-	a[15] &= 0xf0
-	base := netip.AddrFrom16(a)
-	if z := addr.Zone(); z != "" {
-		base = base.WithZone(z)
-	}
-	return base
-}
-
-func expandIPv6Block124(base netip.Addr) []string {
-	a := base.As16()
-	out := make([]string, 0, 16)
-	for i := 0; i < 16; i++ {
-		b := a
-		b[15] = (b[15] & 0xf0) | byte(i)
-		out = append(out, netip.AddrFrom16(b).String())
-	}
-	return out
-}
-
-func topIPs(results []ProbeResult, n int) []string {
+// shortlist 取粗筛延迟最低的 n 个 IP。
+func shortlist(results []ProbeResult, n int) []string {
 	best := map[string]ProbeResult{}
 	for _, r := range results {
 		if !r.OK {
@@ -352,7 +313,7 @@ func topIPs(results []ProbeResult, n int) []string {
 	for _, r := range best {
 		oks = append(oks, r)
 	}
-	sort.SliceStable(oks, func(i, j int) bool {
+	sort.Slice(oks, func(i, j int) bool {
 		if oks[i].Latency == oks[j].Latency {
 			return oks[i].IP < oks[j].IP
 		}
@@ -366,6 +327,114 @@ func topIPs(results []ProbeResult, n int) []string {
 		out = append(out, r.IP)
 	}
 	return out
+}
+
+// refine 对每个 IP 间隔采样 Samples 次握手；超时设为 SYN 重传时间，重传才成功的算丢包。
+func refine(ctx context.Context, ips []string, opt Options) []Candidate {
+	workers := opt.Workers
+	if workers > len(ips) {
+		workers = len(ips)
+	}
+	if workers <= 0 {
+		return nil
+	}
+	out := make([]Candidate, len(ips))
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i, ip := range ips {
+		wg.Add(1)
+		go func(i int, ip string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			lats := make([]time.Duration, 0, opt.Samples)
+			for s := 0; s < opt.Samples && ctx.Err() == nil; s++ {
+				if s > 0 {
+					select {
+					case <-time.After(opt.SampleGap):
+					case <-ctx.Done():
+					}
+				}
+				if r := probeOne(ctx, ip, opt.ProbePort, opt.SampleTimeout); r.OK {
+					lats = append(lats, r.Latency)
+				}
+			}
+			out[i] = summarize(ip, opt.Samples, lats)
+		}(i, ip)
+	}
+	wg.Wait()
+	return out
+}
+
+func summarize(ip string, samples int, lats []time.Duration) Candidate {
+	c := Candidate{IP: ip, Samples: samples, Lost: samples - len(lats)}
+	if len(lats) == 0 {
+		return c
+	}
+	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	c.Median = lats[len(lats)/2]
+	c.P90 = lats[(len(lats)*9)/10]
+	return c
+}
+
+func sortByScore(cs []Candidate) {
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].Score() == cs[j].Score() {
+			return cs[i].IP < cs[j].IP
+		}
+		return cs[i].Score() < cs[j].Score()
+	})
+}
+
+// pickDistinct 按 Score 选 n 个 IP，丢包过半的不要。先每个网段只取一个；
+// 网段不够时再从剩余 IP 补齐，保证每个域名尽量各占一个独立 IP。
+func pickDistinct(cs []Candidate, n int) []Candidate {
+	usable := make([]Candidate, 0, len(cs))
+	for _, c := range cs {
+		if c.Lost < c.Samples && c.Lost*2 <= c.Samples {
+			usable = append(usable, c)
+		}
+	}
+	sortByScore(usable)
+	out := make([]Candidate, 0, n)
+	taken := map[string]bool{}
+	blocks := map[netip.Prefix]bool{}
+	for _, c := range usable {
+		if len(out) == n {
+			return out
+		}
+		b, ok := block(c.IP)
+		if !ok || blocks[b] {
+			continue
+		}
+		blocks[b] = true
+		taken[c.IP] = true
+		out = append(out, c)
+	}
+	for _, c := range usable {
+		if len(out) == n {
+			break
+		}
+		if !taken[c.IP] {
+			taken[c.IP] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// block 返回 IP 所在的 /24（IPv4）或 /64（IPv6）。
+func block(ip string) (netip.Prefix, bool) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	bits := 64
+	if addr.Is4() {
+		bits = 24
+	}
+	p, err := addr.WithZone("").Prefix(bits)
+	return p, err == nil
 }
 
 func uniqueIPs(in []string) []string {
@@ -382,20 +451,6 @@ func uniqueIPs(in []string) []string {
 		}
 		seen[s] = true
 		out = append(out, s)
-	}
-	return out
-}
-
-func subtract(in, minus []string) []string {
-	m := map[string]bool{}
-	for _, x := range minus {
-		m[x] = true
-	}
-	out := []string{}
-	for _, x := range in {
-		if !m[x] {
-			out = append(out, x)
-		}
 	}
 	return out
 }
